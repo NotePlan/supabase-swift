@@ -86,6 +86,11 @@ public final class RealtimeChannelV2: Sendable {
   /// Subscribes to the channel
   @MainActor
   public func subscribe() async {
+    await subscribe(retryCount: 0)
+  }
+
+  @MainActor
+  private func subscribe(retryCount: Int = 0) async {
     if socket.status != .connected {
       if socket.options.connectOnSubscribe != true {
         reportIssue(
@@ -131,8 +136,13 @@ public final class RealtimeChannelV2: Sendable {
       }
     } catch {
       if error is TimeoutError {
-        logger?.debug("Subscribe timed out.")
-        await subscribe()
+        if retryCount < 6 {
+          logger?.debug("Subscribe timed out. Retrying in 2 seconds... (attempt \(retryCount + 2) of 6)")
+          try? await Task.sleep(nanoseconds: 2_000_000_000) // 2 seconds
+          await subscribe(retryCount: retryCount + 1)
+        } else {
+          logger?.error("Subscribe failed after 3 attempts due to timeout.")
+        }
       } else {
         logger?.error("Subscribe failed: \(error)")
       }
