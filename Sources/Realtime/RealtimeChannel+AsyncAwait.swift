@@ -12,12 +12,14 @@ extension RealtimeChannelV2 {
   public func presenceChange() -> AsyncStream<any PresenceAction> {
     let (stream, continuation) = AsyncStream<any PresenceAction>.makeStream()
 
-    let subscription = onPresenceChange {
-      continuation.yield($0)
-    }
+    Task {
+      let subscription = await onPresenceChange {
+        continuation.yield($0)
+      }
 
-    continuation.onTermination = { _ in
-      subscription.cancel()
+      continuation.onTermination = { _ in
+        subscription.cancel()
+      }
     }
 
     return stream
@@ -140,16 +142,18 @@ extension RealtimeChannelV2 {
     filter: String?
   ) -> AsyncStream<AnyAction> {
     let (stream, continuation) = AsyncStream<AnyAction>.makeStream()
-    let subscription = _onPostgresChange(
-      event: event,
-      schema: schema,
-      table: table,
-      filter: filter
-    ) {
-      continuation.yield($0)
-    }
-    continuation.onTermination = { _ in
-      subscription.cancel()
+    Task {
+      let subscription = await _onPostgresChange(
+        event: event,
+        schema: schema,
+        table: table,
+        filter: filter
+      ) {
+        continuation.yield($0)
+      }
+      continuation.onTermination = { _ in
+        subscription.cancel()
+      }
     }
     return stream
   }

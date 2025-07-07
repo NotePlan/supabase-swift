@@ -5,59 +5,51 @@
 //  Created by Guilherme Souza on 31/10/24.
 //
 
-import ConcurrencyExtras
 import Foundation
 
 /// A thread-safe subject that wraps a single value and provides async access to its updates.
 /// Similar to Combine's CurrentValueSubject, but designed for async/await usage.
-package final class AsyncValueSubject<Value: Sendable>: Sendable {
+package actor AsyncValueSubject<Value: Sendable> {
 
   /// Defines how values are buffered in the underlying AsyncStream.
   package typealias BufferingPolicy = AsyncStream<Value>.Continuation.BufferingPolicy
 
-  /// Internal state container for the subject.
-  struct MutableState {
-    var value: Value
-    var continuations: [UInt: AsyncStream<Value>.Continuation] = [:]
-    var count: UInt = 0
-    var finished = false
-  }
-
-  let bufferingPolicy: UncheckedSendable<BufferingPolicy>
-  let mutableState: LockIsolated<MutableState>
+  private var value: Value
+  private var continuations: [UInt: AsyncStream<Value>.Continuation] = [:]
+  private var count: UInt = 0
+  private var finished = false
+  private let bufferingPolicy: BufferingPolicy
 
   /// Creates a new AsyncValueSubject with an initial value.
   /// - Parameters:
   ///   - initialValue: The initial value to store
   ///   - bufferingPolicy: Determines how values are buffered in the AsyncStream (defaults to .unbounded)
   package init(_ initialValue: Value, bufferingPolicy: BufferingPolicy = .unbounded) {
-    self.mutableState = LockIsolated(MutableState(value: initialValue))
-    self.bufferingPolicy = UncheckedSendable(bufferingPolicy)
+    self.value = initialValue
+    self.bufferingPolicy = bufferingPolicy
   }
 
   deinit {
-    finish()
+    Task { await finish() }
   }
 
   /// The current value stored in the subject.
-  package var value: Value {
-    mutableState.value
+  package var currentValue: Value {
+    value
   }
 
   /// Resume the task awaiting the next iteration point by having it return normally from its suspension point with a given element.
   /// - Parameter value: The value to yield from the continuation.
   ///
-  /// If nothing is awaiting the next value, this method attempts to buffer the result’s element.
+  /// If nothing is awaiting the next value, this method attempts to buffer the result's element.
   ///
   /// This can be called more than once and returns to the caller immediately without blocking for any awaiting consumption from the iteration.
   package func yield(_ value: Value) {
-    mutableState.withValue {
-      guard !$0.finished else { return }
-
-      $0.value = value
-      for (_, continuation) in $0.continuations {
-        continuation.yield(value)
-      }
+    guard !finished else { return }
+    
+    self.value = value
+    for (_, continuation) in continuations {
+      continuation.yield(value)
     }
   }
 
@@ -68,21 +60,20 @@ package final class AsyncValueSubject<Value: Sendable>: Sendable {
   /// finish, the stream enters a terminal state and doesn't produce any
   /// additional elements.
   package func finish() {
-    mutableState.withValue {
-      guard $0.finished == false else { return }
-
-      $0.finished = true
-
-      for (_, continuation) in $0.continuations {
-        continuation.finish()
-      }
+    guard !finished else { return }
+    
+    finished = true
+    
+    for (_, continuation) in continuations {
+      continuation.finish()
     }
+    continuations.removeAll()
   }
 
   /// An AsyncStream that emits the current value and all subsequent updates.
-  package var values: AsyncStream<Value> {
-    AsyncStream(bufferingPolicy: bufferingPolicy.value) { continuation in
-      insert(continuation)
+  package nonisolated var values: AsyncStream<Value> {
+    AsyncStream(bufferingPolicy: bufferingPolicy) { continuation in
+      Task { await insert(continuation) }
     }
   }
 
@@ -92,7 +83,7 @@ package final class AsyncValueSubject<Value: Sendable>: Sendable {
   ///   - handler: A closure that will be called with each new value
   /// - Returns: A task that can be cancelled to stop observing changes
   @discardableResult
-  package func onChange(
+  package nonisolated func onChange(
     priority: TaskPriority? = nil,
     _ handler: @escaping @Sendable (Value) -> Void
   ) -> Task<Void, Never> {
@@ -109,28 +100,29 @@ package final class AsyncValueSubject<Value: Sendable>: Sendable {
 
   /// Adds a new continuation to the subject and yields the current value.
   private func insert(_ continuation: AsyncStream<Value>.Continuation) {
-    mutableState.withValue { state in
-      continuation.yield(state.value)
-      let id = state.count + 1
-      state.count = id
-      state.continuations[id] = continuation
-
-      continuation.onTermination = { [weak self] _ in
-        self?.remove(continuation: id)
-      }
+    guard !finished else {
+      continuation.finish()
+      return
+    }
+    
+    continuation.yield(value)
+    count += 1
+    let id = count
+    continuations[id] = continuation
+    
+    continuation.onTermination = { [weak self] _ in
+      Task { await self?.remove(continuation: id) }
     }
   }
 
   /// Removes a continuation when it's terminated.
   private func remove(continuation id: UInt) {
-    mutableState.withValue {
-      _ = $0.continuations.removeValue(forKey: id)
-    }
+    _ = continuations.removeValue(forKey: id)
   }
 }
 
 extension AsyncValueSubject where Value == Void {
-  package func yield() {
-    self.yield(())
+  package func yield() async {
+    await self.yield(())
   }
 }

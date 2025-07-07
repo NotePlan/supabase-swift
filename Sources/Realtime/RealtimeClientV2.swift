@@ -62,9 +62,12 @@ public final class RealtimeClientV2: Sendable {
   }
 
   /// The current connection status.
-  public private(set) var status: RealtimeClientStatus {
-    get { statusSubject.value }
-    set { statusSubject.yield(newValue) }
+  public var status: RealtimeClientStatus {
+    get async { await statusSubject.currentValue }
+  }
+  
+  private func setStatus(_ newStatus: RealtimeClientStatus) {
+    Task { await statusSubject.yield(newStatus) }
   }
 
   /// Listen for heartbeat status.
@@ -171,7 +174,7 @@ public final class RealtimeClientV2: Sendable {
   }
 
   func connect(reconnect: Bool) async {
-    if status == .disconnected {
+    if await status == .disconnected {
       let connectionTask = Task {
         if reconnect {
           try? await _clock.sleep(for: options.reconnectDelay)
@@ -182,12 +185,12 @@ public final class RealtimeClientV2: Sendable {
           }
         }
 
-        if status == .connected {
+        if await status == .connected {
           options.logger?.debug("WebsSocket already connected")
           return
         }
 
-        status = .connecting
+        setStatus(.connecting)
 
         do {
           let conn = try await wsTransport(
@@ -214,7 +217,7 @@ public final class RealtimeClientV2: Sendable {
   }
 
   private func onConnected(reconnect: Bool) {
-    status = .connected
+    setStatus(.connected)
     options.logger?.debug("Connected to realtime WebSocket")
     listenForMessages()
     startHeartbeating()
@@ -310,7 +313,7 @@ public final class RealtimeClientV2: Sendable {
   ///
   /// If there is no channel left, client is disconnected.
   public func removeChannel(_ channel: RealtimeChannelV2) async {
-    if channel.status == .subscribed {
+    if await channel.status == .subscribed {
       await channel.unsubscribe()
     }
 
@@ -398,8 +401,8 @@ public final class RealtimeClientV2: Sendable {
   }
 
   private func sendHeartbeat() async {
-    if status != .connected {
-      heartbeatSubject.yield(.disconnected)
+    if await status != .connected {
+      await heartbeatSubject.yield(.disconnected)
       return
     }
 
@@ -424,11 +427,11 @@ public final class RealtimeClientV2: Sendable {
           payload: [:]
         )
       )
-      heartbeatSubject.yield(.sent)
+      await heartbeatSubject.yield(.sent)
       await setAuth()
     } else {
       options.logger?.debug("Heartbeat timeout")
-      heartbeatSubject.yield(.timeout)
+      await heartbeatSubject.yield(.timeout)
       reconnect(disconnectReason: "heartbeat timeout")
     }
   }
@@ -450,7 +453,7 @@ public final class RealtimeClientV2: Sendable {
       $0.conn = nil
     }
 
-    status = .disconnected
+    setStatus(.disconnected)
   }
 
   /// Sets the JWT access token used for channel subscription authorization and Realtime RLS.
@@ -475,7 +478,7 @@ public final class RealtimeClientV2: Sendable {
     }
 
     for channel in channels.values {
-      if channel.status == .subscribed {
+      if await channel.status == .subscribed {
         options.logger?.debug("Updating auth token for channel \(channel.topic)")
         await channel.push(
           ChannelEvent.accessToken,
@@ -487,7 +490,7 @@ public final class RealtimeClientV2: Sendable {
 
   private func onMessage(_ message: RealtimeMessageV2) async {
     if message.topic == "phoenix", message.event == "phx_reply" {
-      heartbeatSubject.yield(message.status == .ok ? .ok : .error)
+      await heartbeatSubject.yield(message.status == .ok ? .ok : .error)
     }
 
     let channel = mutableState.withValue {
@@ -530,11 +533,13 @@ public final class RealtimeClientV2: Sendable {
       }
     }
 
-    if status == .connected {
-      callback()
-    } else {
-      mutableState.withValue {
-        $0.sendBuffer.append(callback)
+    Task {
+      if await status == .connected {
+        callback()
+      } else {
+        mutableState.withValue {
+          $0.sendBuffer.append(callback)
+        }
       }
     }
   }

@@ -46,9 +46,13 @@ public final class RealtimeChannelV2: Sendable {
   let callbackManager = CallbackManager()
   private let statusSubject = AsyncValueSubject<RealtimeChannelStatus>(.unsubscribed)
 
-  public private(set) var status: RealtimeChannelStatus {
-    get { statusSubject.value }
-    set { statusSubject.yield(newValue) }
+  public var status: RealtimeChannelStatus {
+    get async { await statusSubject.currentValue }
+  }
+  
+  @MainActor
+  private func setStatus(_ newStatus: RealtimeChannelStatus) {
+    Task { await statusSubject.yield(newStatus) }
   }
 
   public var statusChange: AsyncStream<RealtimeChannelStatus> {
@@ -91,7 +95,7 @@ public final class RealtimeChannelV2: Sendable {
 
   @MainActor
   private func subscribe(retryCount: Int = 0) async {
-    if socket.status != .connected {
+    if await socket.status != .connected {
       if socket.options.connectOnSubscribe != true {
         reportIssue(
           "You can't subscribe to a channel while the realtime client is not connected. Did you forget to call `realtime.connect()`?"
@@ -101,7 +105,7 @@ public final class RealtimeChannelV2: Sendable {
       await socket.connect()
     }
 
-    status = .subscribing
+    setStatus(.subscribing)
     logger?.debug("Subscribing to channel \(topic)")
 
     config.presence.enabled = callbackManager.callbacks.contains(where: { $0.isPresence })
@@ -149,8 +153,9 @@ public final class RealtimeChannelV2: Sendable {
     }
   }
 
+  @MainActor
   public func unsubscribe() async {
-    status = .unsubscribing
+    setStatus(.unsubscribing)
     logger?.debug("Unsubscribing from channel \(topic)")
 
     await push(ChannelEvent.leave)
@@ -184,7 +189,7 @@ public final class RealtimeChannelV2: Sendable {
   ///   - message: Message payload.
   @MainActor
   public func broadcast(event: String, message: JSONObject) async {
-    if status != .subscribed {
+    if await status != .subscribed {
       struct Message: Encodable {
         let topic: String
         let event: String
@@ -249,7 +254,7 @@ public final class RealtimeChannelV2: Sendable {
   /// Tracks the given state in the channel.
   /// - Parameter state: The state to be tracked as a `JSONObject`.
   public func track(state: JSONObject) async {
-    if status != .subscribed {
+    if await status != .subscribed {
       reportIssue(
         "You can only track your presence after subscribing to the channel. Did you forget to call `channel.subscribe()`?"
       )
@@ -276,6 +281,7 @@ public final class RealtimeChannelV2: Sendable {
     )
   }
 
+  @MainActor
   func onMessage(_ message: RealtimeMessageV2) async {
     do {
       guard let eventType = message._eventType else {
@@ -291,7 +297,7 @@ public final class RealtimeChannelV2: Sendable {
       case .system:
         if message.status == .ok {
           logger?.debug("Subscribed to channel \(message.topic)")
-          status = .subscribed
+          setStatus(.subscribed)
         } else {
           logger?.debug(
             "Failed to subscribe to channel \(message.topic): \(message.payload)"
@@ -319,8 +325,8 @@ public final class RealtimeChannelV2: Sendable {
 
           callbackManager.setServerChanges(changes: serverPostgresChanges ?? [])
 
-          if self.status != .subscribed {
-            self.status = .subscribed
+          if await self.status != .subscribed {
+            self.setStatus(.subscribed)
             logger?.debug("Subscribed to channel \(message.topic)")
           }
         }
@@ -386,7 +392,7 @@ public final class RealtimeChannelV2: Sendable {
       case .close:
         socket._remove(self)
         logger?.debug("Unsubscribed from channel \(message.topic)")
-        status = .unsubscribed
+        setStatus(.unsubscribed)
 
       case .error:
         logger?.error(
@@ -410,8 +416,8 @@ public final class RealtimeChannelV2: Sendable {
   /// Listen for clients joining / leaving the channel using presences.
   public func onPresenceChange(
     _ callback: @escaping @Sendable (any PresenceAction) -> Void
-  ) -> RealtimeSubscription {
-    if status == .subscribed {
+  ) async -> RealtimeSubscription {
+    if await status == .subscribed {
       logger?.debug(
         "Resubscribe to \(self.topic) due to change in presence callback on joined channel."
       )
@@ -436,8 +442,8 @@ public final class RealtimeChannelV2: Sendable {
     table: String? = nil,
     filter: String? = nil,
     callback: @escaping @Sendable (AnyAction) -> Void
-  ) -> RealtimeSubscription {
-    _onPostgresChange(
+  ) async -> RealtimeSubscription {
+    await _onPostgresChange(
       event: .all,
       schema: schema,
       table: table,
@@ -454,8 +460,8 @@ public final class RealtimeChannelV2: Sendable {
     table: String? = nil,
     filter: String? = nil,
     callback: @escaping @Sendable (InsertAction) -> Void
-  ) -> RealtimeSubscription {
-    _onPostgresChange(
+  ) async -> RealtimeSubscription {
+    await _onPostgresChange(
       event: .insert,
       schema: schema,
       table: table,
@@ -473,8 +479,8 @@ public final class RealtimeChannelV2: Sendable {
     table: String? = nil,
     filter: String? = nil,
     callback: @escaping @Sendable (UpdateAction) -> Void
-  ) -> RealtimeSubscription {
-    _onPostgresChange(
+  ) async -> RealtimeSubscription {
+    await _onPostgresChange(
       event: .update,
       schema: schema,
       table: table,
@@ -492,8 +498,8 @@ public final class RealtimeChannelV2: Sendable {
     table: String? = nil,
     filter: String? = nil,
     callback: @escaping @Sendable (DeleteAction) -> Void
-  ) -> RealtimeSubscription {
-    _onPostgresChange(
+  ) async -> RealtimeSubscription {
+    await _onPostgresChange(
       event: .delete,
       schema: schema,
       table: table,
@@ -510,8 +516,8 @@ public final class RealtimeChannelV2: Sendable {
     table: String?,
     filter: String?,
     callback: @escaping @Sendable (AnyAction) -> Void
-  ) -> RealtimeSubscription {
-    guard status != .subscribed else {
+  ) async -> RealtimeSubscription {
+    guard await status != .subscribed else {
       reportIssue(
         "You cannot call postgresChange after joining the channel, this won't work as expected."
       )
